@@ -19,7 +19,7 @@ Located in `packages/api`, the backend is a serverless application built on **Cl
 
 Key Features:
 - **Plugin Lifecycle Management:** Handles the submission queue, admin approvals/rejections, and version syncing.
-- **GitHub Integrations:** Uses GitHub OAuth for secure user authentication. It also automatically dispatches webhook events to the `CamelC0re/Plugin-Builder` repository to compile and bundle submitted plugins.
+- **GitHub Integrations:** Uses GitHub OAuth for secure user authentication. It also automatically dispatches webhook events to the `CamelKit/Plugin-Builder` repository to compile and bundle submitted plugins.
 - **Cloudflare R2 Storage:** Manages the staging and storage of plugin source code (`.zip` files) downloaded from user repositories.
 - **Cloudflare D1 Database:** Persists user data, plugin metadata, and submission queues globally at the edge.
 
@@ -34,7 +34,7 @@ Key Features:
 
 1. **Clone the repository:**
    ```bash
-   git clone https://github.com/CamelC0re/Hub.git
+   git clone https://github.com/CamelKit/Hub.git
    cd Hub
    ```
 
@@ -72,7 +72,7 @@ Requires the public API URL (defaults to `http://localhost:8787` in development)
 ## 🤝 Contributing
 Contributions to the CamelKit Hub are always welcome! If you'd like to improve the directory UI, add new developer tools, or enhance the backend API, please feel free to open a pull request. 
 
-For the actual CamelKit Client, refer to the [Client](https://github.com/CamelC0re/Client) repository.
+For the actual CamelKit Client, refer to the [Client](https://github.com/CamelKit/Client) repository.
 
 ## 📜 License
 © 2026 CamelKit. All Rights Reserved.

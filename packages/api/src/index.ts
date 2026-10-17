@@ -444,7 +444,7 @@ app.post('/api/admin/plugins/:id/approve', adminGate(), async (c) => {
       };
       c.executionCtx.waitUntil(mockWebhook());
     } else {
-      const dispatchRes = await fetch(`https://api.github.com/repos/CamelC0re/Plugin-Builder/dispatches`, {
+      const dispatchRes = await fetch(`https://api.github.com/repos/CamelKit/Plugin-Builder/dispatches`, {
         method: 'POST',
         headers: {
           'Accept': 'application/vnd.github.v3+json',
@@ -656,7 +656,7 @@ app.post('/api/developer/plugins/:id/update', githubDeveloperGate(), async (c) =
       };
       c.executionCtx.waitUntil(mockWebhook());
     } else {
-      const dispatchRes = await fetch(`https://api.github.com/repos/CamelC0re/Plugin-Builder/dispatches`, {
+      const dispatchRes = await fetch(`https://api.github.com/repos/CamelKit/Plugin-Builder/dispatches`, {
         method: 'POST',
         headers: {
           'Accept': 'application/vnd.github.v3+json',
