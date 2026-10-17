@@ -306,12 +306,16 @@ app.get('/api/auth/github/callback', async (c) => {
 // --- Public Endpoints ---
 
 // Public manifest tracking endpoint for the Electron Client and public web elements [cite: 93, 117]
-app.get('/manifest.json', async (c) => {
+const manifestHandler = async (c: any) => {
   const { results } = await c.env.DB.prepare(
-    "SELECT id, name, description, author, current_version as version, download_url as url, github_url FROM plugins WHERE status = 'published'"
+    "SELECT id, name, description, author, current_version as version, download_url as url, download_url, github_url, latest_commit_hash FROM plugins WHERE status = 'published'"
   ).all();
   return c.json(results);
-});
+};
+
+app.get('/manifest.json', manifestHandler);
+app.get('/api/plugins/manifest.json', manifestHandler);
+app.get('/api/plugins', manifestHandler);
 
 // Public plugin repository submission route protected by fast edge Zod parsing [cite: 123, 133]
 app.post('/api/plugins/submit', githubDeveloperGate(), zValidator('json', submitPluginSchema), async (c) => {

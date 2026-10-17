@@ -1,10 +1,11 @@
 <script>
+    import { API_URL } from '../config';
+
     let token = '';
     let discordId = null;
     let githubId = null;
     let username = '';
     let camelCoins = 0;
-    const API_URL = import.meta.env.DEV ? 'http://localhost:8787' : import.meta.env.PUBLIC_API_URL;
 
     // Bypass the onMount quirk and initialize immediately on the client
     if (typeof window !== 'undefined') {

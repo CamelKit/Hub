@@ -1,0 +1,19 @@
+# Cloudflare Worker Local Development Variables (.dev.vars)
+# Copy this file to .dev.vars for local testing with `yarn api` / `wrangler dev`
+
+# Non-sensitive variables (overrides wrangler.jsonc for local dev)
+FRONTEND_URL=http://localhost:4321
+PLUGINS_CDN_URL=http://localhost:8787
+
+# Sensitive secrets (use real development credentials)
+JWT_SECRET=development-jwt-secret-replace-in-production
+HUB_CALLBACK_TOKEN=development-callback-token-replace-in-production
+
+# Discord OAuth credentials
+DISCORD_CLIENT_ID=your_discord_client_id
+DISCORD_CLIENT_SECRET=your_discord_client_secret
+
+# GitHub OAuth & Dispatch credentials
+GITHUB_CLIENT_ID=your_github_client_id
+GITHUB_CLIENT_SECRET=your_github_client_secret
+GITHUB_BUILDER_PAT=your_github_personal_access_token

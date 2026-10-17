@@ -1,5 +1,6 @@
 <script>
     import { addToast } from '../stores/toast.js';
+    import { API_URL } from '../config';
     let queue = [];
     let loading = true;
     let errorMsg = '';
@@ -21,7 +22,6 @@
         }
 
         try {
-            const API_URL = import.meta.env.DEV ? 'http://localhost:8787' : import.meta.env.PUBLIC_API_URL;
             const res = await fetch(`${API_URL}/api/admin/queue`, {
                 headers: {
                     'Authorization': `Bearer ${token}`
@@ -49,7 +49,6 @@
     async function handlePluginAction(id, action) {
         if (!token) return;
         try {
-            const API_URL = import.meta.env.DEV ? 'http://localhost:8787' : import.meta.env.PUBLIC_API_URL;
             const res = await fetch(`${API_URL}/api/admin/plugins/${id}/${action}`, {
                 method: 'POST',
                 headers: { 'Authorization': `Bearer ${token}` }

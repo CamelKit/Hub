@@ -1,5 +1,6 @@
 <script>
 	import { onMount } from "svelte";
+	import { API_URL } from "../config";
 
 	let plugins = [];
 	let loading = true;
@@ -7,9 +8,6 @@
 
 	onMount(async () => {
 		try {
-			const API_URL = import.meta.env.DEV
-				? "http://localhost:8787"
-				: import.meta.env.PUBLIC_API_URL;
 			const response = await fetch(`${API_URL}/manifest.json`);
 			if (response.ok) {
 				plugins = await response.json();

@@ -1,6 +1,6 @@
 {
 	"$schema": "node_modules/wrangler/config-schema.json",
-	"name": "camelcore-api",
+	"name": "camelkit-api",
 	"main": "src/index.ts",
 	"compatibility_date": "2026-06-10",
 	"d1_databases": [
@@ -18,6 +18,16 @@
 		{
 			"binding": "STORAGE_BUCKET_STAGING",
 			"bucket_name": "camelcore-plugins-staging"
+		}
+	],
+	"vars": {
+		"FRONTEND_URL": "https://camelkit.dev",
+		"PLUGINS_CDN_URL": "https://plugins.camelkit.dev"
+	},
+	"routes": [
+		{
+			"pattern": "api.camelkit.dev",
+			"custom_domain": true
 		}
 	]
 }

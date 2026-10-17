@@ -1,6 +1,7 @@
 <script>
     import { createEventDispatcher } from 'svelte';
     import { addToast } from '../stores/toast.js';
+    import { API_URL } from '../config';
     const dispatch = createEventDispatcher();
 
     let url = '';
@@ -8,7 +9,6 @@
     async function handleSubmit() {
         try {
             const token = localStorage.getItem('camelkit_token') || localStorage.getItem('camelcore_token');
-            const API_URL = import.meta.env.DEV ? 'http://localhost:8787' : import.meta.env.PUBLIC_API_URL;
             const res = await fetch(`${API_URL}/api/plugins/submit`, {
                 method: 'POST',
                 headers: { 
