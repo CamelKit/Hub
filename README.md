@@ -1,20 +1,20 @@
-# CamelCore Hub
+# CamelKit Hub
 
-Welcome to the **CamelCore Hub**, the official central directory and plugin submission platform for CamelCore (a RuneLite-esque client for EvilQuest). This monorepo powers both the public-facing frontend directory and the robust backend API handling plugin lifecycle management.
+Welcome to the **CamelKit Hub**, the official central directory and plugin submission platform for CamelKit (a RuneLite-esque client for EvilQuest). This monorepo powers both the public-facing frontend directory and the robust backend API handling plugin lifecycle management.
 
 ## 🏗️ Architecture
 
 This repository is structured as a Yarn monorepo containing two main packages:
 
-### `@camelcore/web` (Frontend)
+### `@camelkit/web` (Frontend)
 Located in `packages/web`, the frontend is built using **Astro** for lightning-fast static and dynamic rendering, paired with **Svelte** for highly interactive components. It features a bespoke retro dark fantasy design aesthetic tailored to match EvilQuest's immersive world.
 
 Key Features:
-- **Public Plugin Directory:** Browse all officially approved CamelCore plugins.
+- **Public Plugin Directory:** Browse all officially approved CamelKit plugins.
 - **Developer Dashboard:** Authenticated developers can submit new plugins and sync remote repository updates.
 - **Admin Dashboard:** Admins can review, approve, or reject pending plugin submissions from the community.
 
-### `@camelcore/api` (Backend)
+### `@camelkit/api` (Backend)
 Located in `packages/api`, the backend is a serverless application built on **Cloudflare Workers**. It acts as the secure bridge between the frontend application, our database, and external integrations.
 
 Key Features:
@@ -70,11 +70,11 @@ Requires GitHub OAuth client credentials, database bindings, and R2 storage buck
 Requires the public API URL (defaults to `http://localhost:8787` in development) and any public-facing OAuth keys.
 
 ## 🤝 Contributing
-Contributions to the CamelCore Hub are always welcome! If you'd like to improve the directory UI, add new developer tools, or enhance the backend API, please feel free to open a pull request. 
+Contributions to the CamelKit Hub are always welcome! If you'd like to improve the directory UI, add new developer tools, or enhance the backend API, please feel free to open a pull request. 
 
-For the actual CamelCore Client, refer to the [Client](https://github.com/CamelC0re/Client) repository.
+For the actual CamelKit Client, refer to the [Client](https://github.com/CamelC0re/Client) repository.
 
 ## 📜 License
-© 2026 CamelCore. All Rights Reserved.
+© 2026 CamelKit. All Rights Reserved.
 
-This repository is publicly visible for transparency and to allow contributions to the official CamelCore project, but it is **not** open-source software. You are not permitted to copy, distribute, modify, or use this code for any other projects without explicit permission.
+This repository is publicly visible for transparency and to allow contributions to the official CamelKit project, but it is **not** open-source software. You are not permitted to copy, distribute, modify, or use this code for any other projects without explicit permission.

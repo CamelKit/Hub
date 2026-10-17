@@ -248,7 +248,7 @@ app.get('/api/auth/github/callback', async (c) => {
   const userResponse = await fetch('https://api.github.com/user', {
     headers: {
       'Authorization': `Bearer ${tokenData.access_token}`,
-      'User-Agent': 'CamelCore-Hub',
+      'User-Agent': 'CamelKit-Hub',
       'Accept': 'application/vnd.github.v3+json'
     },
   });
@@ -338,7 +338,7 @@ app.post('/api/plugins/submit', githubDeveloperGate(), zValidator('json', submit
   try {
     const ghRes = await fetch(`https://api.github.com/repos/${owner}/${repo}`, {
       headers: {
-        'User-Agent': 'CamelCore-Hub',
+        'User-Agent': 'CamelKit-Hub',
         'Accept': 'application/vnd.github.v3+json'
       }
     });
@@ -396,7 +396,7 @@ app.post('/api/admin/plugins/:id/approve', adminGate(), async (c) => {
     const zipUrl = `https://api.github.com/repos/${owner}/${repo}/zipball`;
     const zipRes = await fetch(zipUrl, {
       headers: {
-        'User-Agent': 'CamelCore-Hub',
+        'User-Agent': 'CamelKit-Hub',
         'Accept': 'application/vnd.github.v3+json',
       }
     });
@@ -416,7 +416,7 @@ app.post('/api/admin/plugins/:id/approve', adminGate(), async (c) => {
     try {
       const latestCommitRes = await fetch(`https://api.github.com/repos/${owner}/${repo}/commits`, {
         headers: {
-          'User-Agent': 'CamelCore-Hub',
+          'User-Agent': 'CamelKit-Hub',
           'Accept': 'application/vnd.github.v3+json'
         }
       });
@@ -449,7 +449,7 @@ app.post('/api/admin/plugins/:id/approve', adminGate(), async (c) => {
         headers: {
           'Accept': 'application/vnd.github.v3+json',
           'Authorization': `Bearer ${c.env.GITHUB_BUILDER_PAT}`,
-          'User-Agent': 'CamelCore-Hub',
+          'User-Agent': 'CamelKit-Hub',
           'Content-Type': 'application/json'
         },
         body: JSON.stringify({
@@ -559,7 +559,7 @@ app.get('/api/developer/plugins', githubDeveloperGate(), async (c) => {
         try {
           const ghRes = await fetch(`https://api.github.com/repos/${owner}/${repo}/commits`, {
             headers: {
-              'User-Agent': 'CamelCore-Hub',
+              'User-Agent': 'CamelKit-Hub',
               'Accept': 'application/vnd.github.v3+json',
               'Authorization': `Bearer ${c.env.GITHUB_BUILDER_PAT}`
             }
@@ -603,7 +603,7 @@ app.post('/api/developer/plugins/:id/update', githubDeveloperGate(), async (c) =
   try {
     const ghRes = await fetch(`https://api.github.com/repos/${owner}/${repo}/commits`, {
       headers: {
-        'User-Agent': 'CamelCore-Hub',
+        'User-Agent': 'CamelKit-Hub',
         'Accept': 'application/vnd.github.v3+json'
       }
     });
@@ -623,7 +623,7 @@ app.post('/api/developer/plugins/:id/update', githubDeveloperGate(), async (c) =
     const zipUrl = `https://api.github.com/repos/${owner}/${repo}/zipball`;
     const zipRes = await fetch(zipUrl, {
       headers: {
-        'User-Agent': 'CamelCore-Hub',
+        'User-Agent': 'CamelKit-Hub',
         'Accept': 'application/vnd.github.v3+json',
       }
     });
@@ -661,7 +661,7 @@ app.post('/api/developer/plugins/:id/update', githubDeveloperGate(), async (c) =
         headers: {
           'Accept': 'application/vnd.github.v3+json',
           'Authorization': `Bearer ${c.env.GITHUB_BUILDER_PAT}`,
-          'User-Agent': 'CamelCore-Hub',
+          'User-Agent': 'CamelKit-Hub',
           'Content-Type': 'application/json'
         },
         body: JSON.stringify({

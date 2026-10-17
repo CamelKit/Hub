@@ -21,7 +21,7 @@ const { title } = Astro.props;
 	</head>
 	<body>
 		<nav class="navbar">
-			<span class="nav-brand">CamelCore</span>
+			<span class="nav-brand">CamelKit</span>
 			<div class="nav-links">
 				<a href="/">Home</a>
 				<a href="/plugins">Plugins</a>
@@ -34,7 +34,7 @@ const { title } = Astro.props;
 		<slot />
 
 		<script>
-			const token = localStorage.getItem('camelcore_token');
+			const token = localStorage.getItem('camelkit_token') || localStorage.getItem('camelcore_token');
 			if (token) {
 				try {
 					const payloadBase64 = token.split('.')[1];

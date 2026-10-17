@@ -1,5 +1,5 @@
 {
-  "name": "@camelcore/hub",
+  "name": "@camelkit/hub",
   "version": "1.0.0",
   "main": "index.js",
   "license": "MIT",
@@ -8,8 +8,9 @@
     "packages/*"
   ],
   "scripts": {
-    "web": "yarn workspace @camelcore/web dev",
-    "api": "yarn workspace @camelcore/api dev"
+    "web": "yarn workspace @camelkit/web dev",
+    "api": "yarn workspace @camelkit/api dev",
+    "build:web": "yarn workspace @camelkit/web build"
   },
   "packageManager": "yarn@4.17.0"
 }

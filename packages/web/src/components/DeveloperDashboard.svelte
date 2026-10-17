@@ -9,7 +9,7 @@
 
     // Initialize immediately (safe because of client:only="svelte")
     try {
-        token = localStorage.getItem('camelcore_token') || '';
+        token = localStorage.getItem('camelkit_token') || localStorage.getItem('camelcore_token') || '';
     } catch (e) {
         token = '';
     }

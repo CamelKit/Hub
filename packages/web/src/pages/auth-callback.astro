@@ -7,7 +7,7 @@ import '../styles/global.css';
 		<meta charset="utf-8" />
 		<link rel="icon" type="image/svg+xml" href="/favicon.svg" />
 		<meta name="viewport" content="width=device-width" />
-		<title>Authenticating... - CamelCore</title>
+		<title>Authenticating... - CamelKit</title>
 	</head>
 	<body>
 		<div class="loading-screen">
@@ -22,6 +22,7 @@ import '../styles/global.css';
 
 			if (token) {
 				// Store in localStorage
+				localStorage.setItem('camelkit_token', token);
 				localStorage.setItem('camelcore_token', token);
 				// Redirect to admin or home
 				window.location.href = '/admin';

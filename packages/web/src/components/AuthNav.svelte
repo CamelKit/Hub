@@ -8,7 +8,7 @@
 
     // Bypass the onMount quirk and initialize immediately on the client
     if (typeof window !== 'undefined') {
-        token = localStorage.getItem('camelcore_token') || '';
+        token = localStorage.getItem('camelkit_token') || localStorage.getItem('camelcore_token') || '';
         if (token) {
             try {
                 const payloadBase64 = token.split('.')[1];
@@ -26,6 +26,7 @@
     }
 
     function logout() {
+        localStorage.removeItem('camelkit_token');
         localStorage.removeItem('camelcore_token');
         window.location.reload();
     }
