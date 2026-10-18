@@ -73,8 +73,8 @@
             const data = await res.json();
 
             if (res.ok) {
-                plugins = plugins.map(p => p.id === id ? { ...p, latest_commit_hash: data.hash } : p);
-                addToast('Plugin updated successfully to commit: ' + data.hash, 'success');
+                plugins = plugins.map(p => p.id === id ? { ...p, latest_commit_hash: data.hash, status: 'building' } : p);
+                addToast('Plugin update queued to commit: ' + (data.hash ? data.hash.substring(0, 7) : ''), 'success');
             } else {
                 addToast('Failed to update plugin: ' + data.error, 'error');
             }
@@ -147,6 +147,18 @@
                                     Up to Date
                                 </button>
                             {/if}
+                        {:else if (plugin?.status || 'pending') === 'building'}
+                            <div class="building-container">
+                                <span class="spinner-small"></span>
+                                <span class="building-msg">Building in CI...</span>
+                            </div>
+                        {:else if (plugin?.status || 'pending') === 'failed'}
+                            <div class="failed-container">
+                                <span class="failed-msg">Build Failed</span>
+                                <button class="action-btn retry-btn" on:click={() => updatePlugin(plugin.id)}>
+                                    Retry Build
+                                </button>
+                            </div>
                         {:else if (plugin?.status || 'pending') === 'pending'}
                             <span class="pending-msg">Pending Admin Review</span>
                         {:else if (plugin?.status || 'pending') === 'rejected'}
@@ -289,12 +301,18 @@
     /* Status specific styles */
     .plugin-card.pending { border-left: 4px solid #f39c12; }
     .plugin-card.approved { border-left: 4px solid #2ecc71; }
+    .plugin-card.published { border-left: 4px solid #2ecc71; }
+    .plugin-card.building { border-left: 4px solid #3498db; }
+    .plugin-card.failed { border-left: 4px solid #e74c3c; }
     .plugin-card.rejected { border-left: 4px solid #e74c3c; }
 
     .status-badge strong { text-shadow: 0 0 5px currentColor; }
 
     .plugin-card.pending .status-badge strong { color: #f39c12; }
     .plugin-card.approved .status-badge strong { color: #2ecc71; }
+    .plugin-card.published .status-badge strong { color: #2ecc71; }
+    .plugin-card.building .status-badge strong { color: #3498db; }
+    .plugin-card.failed .status-badge strong { color: #e74c3c; }
     .plugin-card.rejected .status-badge strong { color: #e74c3c; }
 
     .pending-msg {
@@ -317,5 +335,62 @@
         text-align: center;
         width: 100%;
         margin-top: 0.5rem;
+    }
+
+    .building-container {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 0.5rem;
+        width: 100%;
+        margin-top: 0.5rem;
+    }
+
+    .building-msg {
+        color: #3498db;
+        font-size: 0.85rem;
+        font-weight: bold;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+    }
+
+    .spinner-small {
+        width: 14px;
+        height: 14px;
+        border: 2px solid rgba(52, 152, 219, 0.2);
+        border-top: 2px solid #3498db;
+        border-radius: 50%;
+        animation: spin 1s linear infinite;
+        display: inline-block;
+    }
+
+    @keyframes spin {
+        0% { transform: rotate(0deg); }
+        100% { transform: rotate(360deg); }
+    }
+
+    .failed-container {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 0.5rem;
+        width: 100%;
+    }
+
+    .failed-msg {
+        color: #e74c3c;
+        font-size: 0.85rem;
+        font-weight: bold;
+        text-transform: uppercase;
+    }
+
+    .retry-btn {
+        border-color: #e74c3c;
+        color: #e74c3c;
+    }
+
+    .retry-btn:hover {
+        background: #e74c3c;
+        color: #fff;
     }
 </style>

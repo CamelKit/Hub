@@ -24,8 +24,26 @@ import '../styles/global.css';
 				// Store in localStorage
 				localStorage.setItem('camelkit_token', token);
 				localStorage.setItem('camelcore_token', token);
-				// Redirect to admin or home
-				window.location.href = '/admin';
+				
+				let targetUrl = '/dashboard';
+				try {
+					const payloadBase64 = token.split('.')[1];
+					if (payloadBase64) {
+						const base64 = payloadBase64.replace(/-/g, '+').replace(/_/g, '/');
+						const payload = JSON.parse(decodeURIComponent(
+							atob(base64)
+								.split('')
+								.map((c) => '%' + ('00' + c.charCodeAt(0).toString(16)).slice(-2))
+								.join('')
+						));
+						if (payload.isAdmin) {
+							targetUrl = '/admin';
+						}
+					}
+				} catch (e) {
+					console.warn('Failed to decode token for role routing', e);
+				}
+				window.location.href = targetUrl;
 			} else {
 				// Handle error
 				document.querySelector('p')!.textContent = 'Authentication failed. No token found.';
