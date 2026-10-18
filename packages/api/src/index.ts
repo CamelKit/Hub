@@ -21,7 +21,6 @@ const ADMIN_GITHUB_IDS = [
 type Bindings = {
   DB: D1Database;
   STORAGE_BUCKET: R2Bucket;
-  STORAGE_BUCKET_STAGING: R2Bucket;
   DISCORD_CLIENT_ID: string;
   DISCORD_CLIENT_SECRET: string;
   GITHUB_CLIENT_ID: string;
@@ -35,6 +34,20 @@ type Bindings = {
 
 const app = new Hono<{ Bindings: Bindings }>();
 
+// Helper for authenticated GitHub API calls using GITHUB_BUILDER_PAT
+async function githubFetch(url: string, env: Bindings, init?: RequestInit): Promise<Response> {
+  const headers = new Headers(init?.headers);
+  headers.set('User-Agent', 'CamelKit-Hub');
+  headers.set('Accept', 'application/vnd.github.v3+json');
+  if (env.GITHUB_BUILDER_PAT) {
+    headers.set('Authorization', `Bearer ${env.GITHUB_BUILDER_PAT}`);
+  }
+  return fetch(url, {
+    ...init,
+    headers,
+  });
+}
+
 // 2. Enable safe communication routes for your Astro front-end
 app.use('*', async (c, next) => {
   const corsMiddleware = cors({
@@ -43,8 +56,20 @@ app.use('*', async (c, next) => {
       const cleanHost = frontendUrl.replace(/^https?:\/\//, '').replace(/\/$/, '');
 
       if (!origin) return frontendUrl || 'http://localhost:4321';
-      if (origin.includes('localhost') || (cleanHost && origin.includes(cleanHost))) {
-        return origin;
+      try {
+        const originUrl = new URL(origin);
+        const host = originUrl.hostname.toLowerCase();
+        if (host === 'localhost' || host === '127.0.0.1') {
+          return origin;
+        }
+        if (cleanHost) {
+          const targetHost = cleanHost.toLowerCase();
+          if (host === targetHost || host.endsWith(`.${targetHost}`)) {
+            return origin;
+          }
+        }
+      } catch {
+        // Fall through on malformed origin
       }
       return frontendUrl || 'http://localhost:4321';
     },
@@ -114,11 +139,27 @@ app.get('/api/auth/discord/login', async (c) => {
   const redirectBase = url.origin.replace('127.0.0.1', 'localhost');
   const existingToken = c.req.query('token');
   const redirectUri = encodeURIComponent(`${redirectBase}/api/auth/discord/callback`);
-  let stateParam = '';
+  
+  let linkUserId: string | null = null;
   if (existingToken) {
-    stateParam = `&state=${existingToken}`;
+    try {
+      const payload = await verify(existingToken, c.env.JWT_SECRET, 'HS256');
+      if (payload?.id) {
+        linkUserId = payload.id as string;
+      }
+    } catch { }
   }
-  const discordAuthUrl = `https://discord.com/api/oauth2/authorize?client_id=${c.env.DISCORD_CLIENT_ID}&redirect_uri=${redirectUri}&response_type=code&scope=identify${stateParam}`;
+
+  // Create an HMAC-signed state nonce expiring in 10 minutes
+  const state = await sign({
+    type: 'oauth_state',
+    provider: 'discord',
+    linkUserId,
+    nonce: crypto.randomUUID(),
+    exp: Math.floor(Date.now() / 1000) + 600,
+  }, c.env.JWT_SECRET, 'HS256');
+
+  const discordAuthUrl = `https://discord.com/api/oauth2/authorize?client_id=${c.env.DISCORD_CLIENT_ID}&redirect_uri=${redirectUri}&response_type=code&scope=identify&state=${encodeURIComponent(state)}`;
   return c.redirect(discordAuthUrl);
 });
 
@@ -126,6 +167,26 @@ app.get('/api/auth/discord/callback', async (c) => {
   const code = c.req.query('code');
   if (!code) {
     return c.text('No code provided', 400);
+  }
+
+  const state = c.req.query('state');
+  let linkedUserId: number | null = null;
+  if (!state) {
+    return c.text('Missing OAuth state parameter', 400);
+  }
+  try {
+    const statePayload = await verify(state, c.env.JWT_SECRET, 'HS256');
+    if (statePayload.type === 'oauth_state' && statePayload.provider === 'discord') {
+      if (statePayload.linkUserId) {
+        linkedUserId = parseInt(statePayload.linkUserId as string);
+      }
+    } else if (statePayload.id) {
+      linkedUserId = parseInt(statePayload.id as string);
+    } else {
+      return c.text('Invalid OAuth state parameter', 400);
+    }
+  } catch (err) {
+    return c.text('Invalid or expired OAuth state parameter', 400);
   }
 
   const url = new URL(c.req.url);
@@ -162,25 +223,27 @@ app.get('/api/auth/discord/callback', async (c) => {
 
   const userData = await userResponse.json() as any;
   const discordId = userData.id;
-  const username = userData.username;
-
-  const state = c.req.query('state');
-  let linkedUserId: number | null = null;
-  if (state) {
-    try {
-      const statePayload = await verify(state, c.env.JWT_SECRET, 'HS256');
-      linkedUserId = parseInt(statePayload.id as string);
-    } catch (err) { }
-  }
+  const discordUsername = userData.username;
 
   let user = await c.env.DB.prepare("SELECT * FROM users WHERE discord_id = ?").bind(discordId).first() as any;
 
-  if (!user) {
+  if (user) {
+    if (linkedUserId && user.id !== linkedUserId) {
+      return c.text('This Discord account is already linked to another user account.', 409);
+    }
+    await c.env.DB.prepare("UPDATE users SET discord_username = ? WHERE id = ?").bind(discordUsername, user.id).run();
+    user.discord_username = discordUsername;
+  } else {
     if (linkedUserId) {
-      await c.env.DB.prepare("UPDATE users SET discord_id = ?, username = ? WHERE id = ?").bind(discordId, username, linkedUserId).run();
+      // Preserve existing primary username when linking secondary provider
+      await c.env.DB.prepare(
+        "UPDATE users SET discord_id = ?, discord_username = ?, username = COALESCE(username, ?) WHERE id = ?"
+      ).bind(discordId, discordUsername, discordUsername, linkedUserId).run();
       user = await c.env.DB.prepare("SELECT * FROM users WHERE id = ?").bind(linkedUserId).first() as any;
     } else {
-      user = await c.env.DB.prepare("INSERT INTO users (discord_id, username) VALUES (?, ?) RETURNING *").bind(discordId, username).first() as any;
+      user = await c.env.DB.prepare(
+        "INSERT INTO users (discord_id, discord_username, username) VALUES (?, ?, ?) RETURNING *"
+      ).bind(discordId, discordUsername, discordUsername).first() as any;
     }
   }
 
@@ -190,6 +253,8 @@ app.get('/api/auth/discord/callback', async (c) => {
   const jwt = await sign({
     id: user.id.toString(),
     username: user.username,
+    github_username: user.github_username || (user.github_id ? user.username : null),
+    discord_username: user.discord_username || (user.discord_id ? user.username : null),
     discord_id: user.discord_id,
     github_id: user.github_id,
     camel_coins: user.camel_coins || 0,
@@ -199,7 +264,6 @@ app.get('/api/auth/discord/callback', async (c) => {
 
   // Redirect to frontend
   const frontendUrl = c.env.FRONTEND_URL || 'http://localhost:4321';
-
   return c.redirect(`${frontendUrl}/auth-callback?token=${jwt}`);
 });
 
@@ -208,11 +272,26 @@ app.get('/api/auth/github/login', async (c) => {
   const redirectBase = url.origin.replace('127.0.0.1', 'localhost');
   const existingToken = c.req.query('token');
   const redirectUri = encodeURIComponent(`${redirectBase}/api/auth/github/callback`);
-  let stateParam = '';
+  
+  let linkUserId: string | null = null;
   if (existingToken) {
-    stateParam = `&state=${existingToken}`;
+    try {
+      const payload = await verify(existingToken, c.env.JWT_SECRET, 'HS256');
+      if (payload?.id) {
+        linkUserId = payload.id as string;
+      }
+    } catch { }
   }
-  const githubAuthUrl = `https://github.com/login/oauth/authorize?client_id=${c.env.GITHUB_CLIENT_ID}&redirect_uri=${redirectUri}&scope=read:user${stateParam}`;
+
+  const state = await sign({
+    type: 'oauth_state',
+    provider: 'github',
+    linkUserId,
+    nonce: crypto.randomUUID(),
+    exp: Math.floor(Date.now() / 1000) + 600,
+  }, c.env.JWT_SECRET, 'HS256');
+
+  const githubAuthUrl = `https://github.com/login/oauth/authorize?client_id=${c.env.GITHUB_CLIENT_ID}&redirect_uri=${redirectUri}&scope=read:user&state=${encodeURIComponent(state)}`;
   return c.redirect(githubAuthUrl);
 });
 
@@ -222,7 +301,25 @@ app.get('/api/auth/github/callback', async (c) => {
     return c.text('No code provided', 400);
   }
 
-  const url = new URL(c.req.url);
+  const state = c.req.query('state');
+  let linkedUserId: number | null = null;
+  if (!state) {
+    return c.text('Missing OAuth state parameter', 400);
+  }
+  try {
+    const statePayload = await verify(state, c.env.JWT_SECRET, 'HS256');
+    if (statePayload.type === 'oauth_state' && statePayload.provider === 'github') {
+      if (statePayload.linkUserId) {
+        linkedUserId = parseInt(statePayload.linkUserId as string);
+      }
+    } else if (statePayload.id) {
+      linkedUserId = parseInt(statePayload.id as string);
+    } else {
+      return c.text('Invalid OAuth state parameter', 400);
+    }
+  } catch (err) {
+    return c.text('Invalid or expired OAuth state parameter', 400);
+  }
 
   // Exchange code for token
   const tokenResponse = await fetch('https://github.com/login/oauth/access_token', {
@@ -259,25 +356,27 @@ app.get('/api/auth/github/callback', async (c) => {
 
   const userData = await userResponse.json() as any;
   const githubId = userData.id.toString();
-  const username = userData.login;
-
-  const state = c.req.query('state');
-  let linkedUserId: number | null = null;
-  if (state) {
-    try {
-      const statePayload = await verify(state, c.env.JWT_SECRET, 'HS256');
-      linkedUserId = parseInt(statePayload.id as string);
-    } catch (err) { }
-  }
+  const githubUsername = userData.login;
 
   let user = await c.env.DB.prepare("SELECT * FROM users WHERE github_id = ?").bind(githubId).first() as any;
 
-  if (!user) {
+  if (user) {
+    if (linkedUserId && user.id !== linkedUserId) {
+      return c.text('This GitHub account is already linked to another user account.', 409);
+    }
+    await c.env.DB.prepare("UPDATE users SET github_username = ? WHERE id = ?").bind(githubUsername, user.id).run();
+    user.github_username = githubUsername;
+  } else {
     if (linkedUserId) {
-      await c.env.DB.prepare("UPDATE users SET github_id = ?, username = ? WHERE id = ?").bind(githubId, username, linkedUserId).run();
+      // Preserve existing primary username when linking secondary provider
+      await c.env.DB.prepare(
+        "UPDATE users SET github_id = ?, github_username = ?, username = COALESCE(username, ?) WHERE id = ?"
+      ).bind(githubId, githubUsername, githubUsername, linkedUserId).run();
       user = await c.env.DB.prepare("SELECT * FROM users WHERE id = ?").bind(linkedUserId).first() as any;
     } else {
-      user = await c.env.DB.prepare("INSERT INTO users (github_id, username) VALUES (?, ?) RETURNING *").bind(githubId, username).first() as any;
+      user = await c.env.DB.prepare(
+        "INSERT INTO users (github_id, github_username, username) VALUES (?, ?, ?) RETURNING *"
+      ).bind(githubId, githubUsername, githubUsername).first() as any;
     }
   }
 
@@ -290,6 +389,8 @@ app.get('/api/auth/github/callback', async (c) => {
   const jwt = await sign({
     id: user.id.toString(),
     username: user.username,
+    github_username: user.github_username || (user.github_id ? user.username : null),
+    discord_username: user.discord_username || (user.discord_id ? user.username : null),
     discord_id: user.discord_id,
     github_id: user.github_id,
     camel_coins: user.camel_coins || 0,
@@ -299,7 +400,6 @@ app.get('/api/auth/github/callback', async (c) => {
 
   // Redirect to frontend
   const frontendUrl = c.env.FRONTEND_URL || 'http://localhost:4321';
-
   return c.redirect(`${frontendUrl}/auth-callback?token=${jwt}`);
 });
 
@@ -308,7 +408,7 @@ app.get('/api/auth/github/callback', async (c) => {
 // Public manifest tracking endpoint for the Electron Client and public web elements [cite: 93, 117]
 const manifestHandler = async (c: any) => {
   const { results } = await c.env.DB.prepare(
-    "SELECT id, name, description, author, current_version as version, download_url as url, download_url, github_url, latest_commit_hash FROM plugins WHERE status = 'published'"
+    "SELECT id, name, description, author, current_version as version, download_url as url, download_url, github_url, latest_commit_hash, asset_sha FROM plugins WHERE status = 'published' OR (status IN ('building', 'failed') AND asset_sha IS NOT NULL)"
   ).all();
   return c.json(results);
 };
@@ -329,24 +429,20 @@ app.post('/api/plugins/submit', githubDeveloperGate(), zValidator('json', submit
   }
   const [_, owner, repo] = match;
 
-  // Verify personal repository ownership
-  if (owner.toLowerCase() !== jwtPayload.username.toLowerCase()) {
+  // Verify personal repository ownership using github_username (fallback to username)
+  const allowedGithubUser = (jwtPayload.github_username || jwtPayload.username || '').toLowerCase();
+  if (owner.toLowerCase() !== allowedGithubUser) {
     return c.json({ error: "You can only submit plugins from your personal GitHub account." }, 403);
   }
 
-  // Fetch from GitHub API
+  // Fetch repository metadata and latest commit hash from GitHub API (authenticated)
   let name = repo;
   let description = '';
   let author = owner;
+  let latestCommitHash = "unknown";
 
   try {
-    const ghRes = await fetch(`https://api.github.com/repos/${owner}/${repo}`, {
-      headers: {
-        'User-Agent': 'CamelKit-Hub',
-        'Accept': 'application/vnd.github.v3+json'
-      }
-    });
-
+    const ghRes = await githubFetch(`https://api.github.com/repos/${owner}/${repo}`, c.env);
     if (ghRes.ok) {
       const ghData = await ghRes.json() as any;
       name = ghData.name || repo;
@@ -358,11 +454,23 @@ app.post('/api/plugins/submit', githubDeveloperGate(), zValidator('json', submit
     // Proceed with default values if GitHub API fails
   }
 
-  // Insert into D1 Database
+  try {
+    const commitRes = await githubFetch(`https://api.github.com/repos/${owner}/${repo}/commits?per_page=1`, c.env);
+    if (commitRes.ok) {
+      const commits = await commitRes.json() as any[];
+      if (commits && commits.length > 0) {
+        latestCommitHash = commits[0].sha;
+      }
+    }
+  } catch (err) {
+    console.error("Failed to fetch latest commit hash from GitHub API", err);
+  }
+
+  // Insert into D1 Database with pinned commit hash
   try {
     await c.env.DB.prepare(
-      "INSERT INTO plugins (github_url, name, description, author, download_url, user_id, submitter_github_id) VALUES (?, ?, ?, ?, ?, ?, ?)"
-    ).bind(githubUrl, name, description, author, githubUrl, parseInt(jwtPayload.id), jwtPayload.github_id).run();
+      "INSERT INTO plugins (github_url, name, description, author, download_url, user_id, submitter_github_id, latest_commit_hash) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+    ).bind(githubUrl, name, description, author, githubUrl, parseInt(jwtPayload.id), jwtPayload.github_id, latestCommitHash).run();
   } catch (err: any) {
     if (err.message && err.message.includes('UNIQUE constraint failed')) {
       return c.json({ error: "This plugin has already been submitted." }, 409);
@@ -396,39 +504,23 @@ app.post('/api/admin/plugins/:id/approve', adminGate(), async (c) => {
     }
     const [_, owner, repo] = match;
 
-    // Fetch the repository zipball
-    const zipUrl = `https://api.github.com/repos/${owner}/${repo}/zipball`;
-    const zipRes = await fetch(zipUrl, {
-      headers: {
-        'User-Agent': 'CamelKit-Hub',
-        'Accept': 'application/vnd.github.v3+json',
+    // Resolve commit hash: use already pinned commit or fetch latest
+    let commit_hash = plugin.latest_commit_hash && plugin.latest_commit_hash !== 'unknown' ? plugin.latest_commit_hash : null;
+    if (!commit_hash) {
+      try {
+        const latestCommitRes = await githubFetch(`https://api.github.com/repos/${owner}/${repo}/commits?per_page=1`, c.env);
+        if (latestCommitRes.ok) {
+          const commits = await latestCommitRes.json() as any[];
+          if (commits && commits.length > 0 && commits[0].sha) commit_hash = commits[0].sha;
+        }
+      } catch (e) {
+        console.error("Failed to fetch commit hash", e);
       }
-    });
-
-    if (!zipRes.ok) {
-      return c.json({ error: "Failed to download plugin source from GitHub." }, 500);
     }
 
-    const zipBuffer = await zipRes.arrayBuffer();
-    const objectKey = `sources/${id}-${repo}.zip`;
-
-    // Upload to R2 Staging
-    await c.env.STORAGE_BUCKET_STAGING.put(objectKey, zipBuffer);
-
-    // Fetch latest commit hash
-    let commit_hash = "unknown";
-    try {
-      const latestCommitRes = await fetch(`https://api.github.com/repos/${owner}/${repo}/commits`, {
-        headers: {
-          'User-Agent': 'CamelKit-Hub',
-          'Accept': 'application/vnd.github.v3+json'
-        }
-      });
-      if (latestCommitRes.ok) {
-        const commits = await latestCommitRes.json() as any[];
-        if (commits.length > 0) commit_hash = commits[0].sha;
-      }
-    } catch (e) { console.error("Failed to fetch commit hash", e); }
+    if (!commit_hash) {
+      return c.json({ error: "Failed to resolve commit hash from GitHub repository." }, 502);
+    }
 
     // Trigger GitHub Actions workflow via repository dispatch
     const isLocalDev = new URL(c.req.url).hostname === 'localhost' || new URL(c.req.url).hostname === '127.0.0.1';
@@ -443,17 +535,14 @@ app.post('/api/admin/plugins/:id/approve', adminGate(), async (c) => {
                 'Authorization': `Bearer ${c.env.HUB_CALLBACK_TOKEN}`,
                 'Content-Type': 'application/json'
             },
-            body: JSON.stringify({ plugin_id: id, commit_hash: commit_hash, status: 'published' })
+            body: JSON.stringify({ plugin_id: id, commit_hash: commit_hash, status: 'published', version: '1.0.0', asset_sha: 'sha256:localdevmock' })
         });
       };
       c.executionCtx.waitUntil(mockWebhook());
     } else {
-      const dispatchRes = await fetch(`https://api.github.com/repos/CamelKit/Plugin-Builder/dispatches`, {
+      const dispatchRes = await githubFetch(`https://api.github.com/repos/CamelKit/Plugin-Builder/dispatches`, c.env, {
         method: 'POST',
         headers: {
-          'Accept': 'application/vnd.github.v3+json',
-          'Authorization': `Bearer ${c.env.GITHUB_BUILDER_PAT}`,
-          'User-Agent': 'CamelKit-Hub',
           'Content-Type': 'application/json'
         },
         body: JSON.stringify({
@@ -464,8 +553,7 @@ app.post('/api/admin/plugins/:id/approve', adminGate(), async (c) => {
             author: plugin.author,
             github_url: plugin.github_url,
             approved_by: jwtPayload.username,
-            commit_hash: commit_hash,
-            source_zip_url: `${new URL(c.req.url).origin}/api/internal/download-source?key=${encodeURIComponent(objectKey)}`
+            commit_hash: commit_hash
           }
         })
       });
@@ -477,7 +565,7 @@ app.post('/api/admin/plugins/:id/approve', adminGate(), async (c) => {
       }
     }
 
-    await c.env.DB.prepare("UPDATE plugins SET status = 'approved' WHERE id = ?").bind(id).run();
+    await c.env.DB.prepare("UPDATE plugins SET status = 'approved', latest_commit_hash = COALESCE(?, latest_commit_hash) WHERE id = ?").bind(commit_hash, id).run();
     return c.json({ success: true, message: "Plugin approved and build triggered." });
   } catch (err) {
     console.error(err);
@@ -497,29 +585,7 @@ app.post('/api/admin/plugins/:id/reject', adminGate(), async (c) => {
   }
 });
 
-// Internal Endpoint for GitHub Actions to securely download the source zip
-app.get('/api/internal/download-source', async (c) => {
-  const authHeader = c.req.header('Authorization');
-  if (!authHeader || authHeader !== `Bearer ${c.env.HUB_CALLBACK_TOKEN}`) {
-    return c.json({ error: "Access Denied." }, 401);
-  }
 
-  const r2Key = c.req.query('key');
-  if (!r2Key) return c.json({ error: "Missing key." }, 400);
-
-  const object = await c.env.STORAGE_BUCKET_STAGING.get(r2Key);
-
-  if (object === null) {
-    return c.json({ error: "Source zip not found." }, 404);
-  }
-
-  const headers = new Headers();
-  object.writeHttpMetadata(headers as any);
-  headers.set('etag', object.httpEtag);
-  headers.set('Content-Type', 'application/zip');
-
-  return new Response(object.body, { headers });
-});
 
 // Webhook for GitHub Actions to report successful build
 app.post('/api/plugins/callback', async (c) => {
@@ -529,18 +595,21 @@ app.post('/api/plugins/callback', async (c) => {
   }
 
   const body = await c.req.json();
-  const { plugin_id, commit_hash, status } = body;
+  const { plugin_id, commit_hash, status, version, asset_sha } = body;
 
   if (status === 'published') {
     // Setting download URL to point to production R2 Bucket
     // The base URL is configured in wrangler.jsonc via PLUGINS_CDN_URL
     const downloadUrl = `${c.env.PLUGINS_CDN_URL.replace(/\/$/, '')}/${plugin_id}/plugin.js`; 
+    const currentVersion = version || body.current_version || null;
+    const assetSha = asset_sha || null;
+
     await c.env.DB.prepare(
-      "UPDATE plugins SET status = 'published', download_url = ?, latest_commit_hash = ? WHERE id = ?"
-    ).bind(downloadUrl, commit_hash, plugin_id).run();
+      "UPDATE plugins SET status = 'published', download_url = ?, latest_commit_hash = ?, current_version = COALESCE(?, current_version), asset_sha = COALESCE(?, asset_sha) WHERE id = ? AND status IN ('approved', 'building', 'published', 'failed')"
+    ).bind(downloadUrl, commit_hash, currentVersion, assetSha, plugin_id).run();
   } else if (status === 'building' || status === 'failed') {
     await c.env.DB.prepare(
-      "UPDATE plugins SET status = ? WHERE id = ?"
+      "UPDATE plugins SET status = ? WHERE id = ? AND status IN ('approved', 'building', 'published', 'failed')"
     ).bind(status, plugin_id).run();
   }
 
@@ -561,13 +630,7 @@ app.get('/api/developer/plugins', githubDeveloperGate(), async (c) => {
       if (match) {
         const [_, owner, repo] = match;
         try {
-          const ghRes = await fetch(`https://api.github.com/repos/${owner}/${repo}/commits`, {
-            headers: {
-              'User-Agent': 'CamelKit-Hub',
-              'Accept': 'application/vnd.github.v3+json',
-              'Authorization': `Bearer ${c.env.GITHUB_BUILDER_PAT}`
-            }
-          });
+          const ghRes = await githubFetch(`https://api.github.com/repos/${owner}/${repo}/commits?per_page=1`, c.env);
           if (ghRes.ok) {
             const commits = await ghRes.json() as any[];
             if (commits && commits.length > 0) {
@@ -598,6 +661,11 @@ app.post('/api/developer/plugins/:id/update', githubDeveloperGate(), async (c) =
     return c.json({ error: "Plugin not found or unauthorized." }, 404);
   }
 
+  // Admin approval gate: developers can only trigger updates on approved, published, or failed plugins
+  if (!['approved', 'published', 'failed'].includes(plugin.status)) {
+    return c.json({ error: `Cannot trigger a build while plugin status is '${plugin.status}'.` }, 403);
+  }
+
   const match = plugin.github_url.match(/^https:\/\/github\.com\/([\w-]+)\/([\w-]+)$/);
   if (!match) {
     return c.json({ error: "Invalid GitHub URL." }, 400);
@@ -605,42 +673,18 @@ app.post('/api/developer/plugins/:id/update', githubDeveloperGate(), async (c) =
   const [_, owner, repo] = match;
 
   try {
-    const ghRes = await fetch(`https://api.github.com/repos/${owner}/${repo}/commits`, {
-      headers: {
-        'User-Agent': 'CamelKit-Hub',
-        'Accept': 'application/vnd.github.v3+json'
-      }
-    });
+    const ghRes = await githubFetch(`https://api.github.com/repos/${owner}/${repo}/commits?per_page=1`, c.env);
 
     if (!ghRes.ok) {
-      return c.json({ error: "Failed to fetch commits from GitHub." }, 500);
+      return c.json({ error: "Failed to fetch commits from GitHub." }, 502);
     }
 
     const commits = await ghRes.json() as any[];
-    if (!commits || commits.length === 0) {
-      return c.json({ error: "No commits found." }, 404);
+    if (!commits || commits.length === 0 || !commits[0].sha) {
+      return c.json({ error: "No commits found in GitHub repository." }, 404);
     }
 
     const latestCommitHash = commits[0].sha;
-
-    // Fetch the repository zipball
-    const zipUrl = `https://api.github.com/repos/${owner}/${repo}/zipball`;
-    const zipRes = await fetch(zipUrl, {
-      headers: {
-        'User-Agent': 'CamelKit-Hub',
-        'Accept': 'application/vnd.github.v3+json',
-      }
-    });
-
-    if (!zipRes.ok) {
-      return c.json({ error: "Failed to download plugin source from GitHub." }, 500);
-    }
-
-    const zipBuffer = await zipRes.arrayBuffer();
-    const objectKey = `sources/${id}-${repo}.zip`;
-
-    // Upload to R2 Staging
-    await c.env.STORAGE_BUCKET_STAGING.put(objectKey, zipBuffer);
 
     // Trigger GitHub Actions workflow via repository dispatch
     const isLocalDev = new URL(c.req.url).hostname === 'localhost' || new URL(c.req.url).hostname === '127.0.0.1';
@@ -655,17 +699,14 @@ app.post('/api/developer/plugins/:id/update', githubDeveloperGate(), async (c) =
                 'Authorization': `Bearer ${c.env.HUB_CALLBACK_TOKEN}`,
                 'Content-Type': 'application/json'
             },
-            body: JSON.stringify({ plugin_id: id, commit_hash: latestCommitHash, status: 'published' })
+            body: JSON.stringify({ plugin_id: id, commit_hash: latestCommitHash, status: 'published', version: '1.0.0', asset_sha: 'sha256:localdevmock' })
         });
       };
       c.executionCtx.waitUntil(mockWebhook());
     } else {
-      const dispatchRes = await fetch(`https://api.github.com/repos/CamelKit/Plugin-Builder/dispatches`, {
+      const dispatchRes = await githubFetch(`https://api.github.com/repos/CamelKit/Plugin-Builder/dispatches`, c.env, {
         method: 'POST',
         headers: {
-          'Accept': 'application/vnd.github.v3+json',
-          'Authorization': `Bearer ${c.env.GITHUB_BUILDER_PAT}`,
-          'User-Agent': 'CamelKit-Hub',
           'Content-Type': 'application/json'
         },
         body: JSON.stringify({
@@ -675,9 +716,8 @@ app.post('/api/developer/plugins/:id/update', githubDeveloperGate(), async (c) =
             plugin_name: plugin.name,
             author: plugin.author,
             github_url: plugin.github_url,
-            approved_by: jwtPayload.username, // Developer syncing their own commit
-            commit_hash: latestCommitHash,
-            source_zip_url: `${new URL(c.req.url).origin}/api/internal/download-source?key=${encodeURIComponent(objectKey)}`
+            approved_by: jwtPayload.github_username || jwtPayload.username, // Developer syncing their own commit
+            commit_hash: latestCommitHash
           }
         })
       });
@@ -690,8 +730,8 @@ app.post('/api/developer/plugins/:id/update', githubDeveloperGate(), async (c) =
     }
 
     await c.env.DB.prepare(
-      "UPDATE plugins SET latest_commit_hash = ?, status = 'building' WHERE id = ?"
-    ).bind(latestCommitHash, id).run();
+      "UPDATE plugins SET status = 'building' WHERE id = ?"
+    ).bind(id).run();
 
     return c.json({ success: true, message: "Plugin updated and build triggered.", hash: latestCommitHash });
   } catch (err) {

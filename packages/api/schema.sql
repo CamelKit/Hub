@@ -4,6 +4,8 @@ CREATE TABLE users (
   discord_id TEXT UNIQUE,
   github_id TEXT UNIQUE,
   username TEXT,
+  github_username TEXT,
+  discord_username TEXT,
   camel_coins INTEGER DEFAULT 0,
   created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
@@ -21,5 +23,7 @@ CREATE TABLE plugins (
   submitter_github_id TEXT,
   user_id INTEGER,
   latest_commit_hash TEXT,
+  asset_sha TEXT,
   FOREIGN KEY (user_id) REFERENCES users(id)
 );
+
