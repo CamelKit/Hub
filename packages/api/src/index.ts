@@ -407,10 +407,15 @@ app.get('/api/auth/github/callback', async (c) => {
 
 // Public manifest tracking endpoint for the Electron Client and public web elements [cite: 93, 117]
 const manifestHandler = async (c: any) => {
-  const { results } = await c.env.DB.prepare(
-    "SELECT id, name, description, author, current_version as version, download_url as url, download_url, github_url, latest_commit_hash, asset_sha FROM plugins WHERE status = 'published' OR (status IN ('building', 'failed') AND asset_sha IS NOT NULL)"
-  ).all();
-  return c.json(results);
+  try {
+    const { results } = await c.env.DB.prepare(
+      "SELECT id, name, description, author, current_version as version, download_url as url, download_url, github_url, latest_commit_hash, asset_sha FROM plugins WHERE status = 'published' OR (status IN ('building', 'failed') AND asset_sha IS NOT NULL)"
+    ).all();
+    return c.json(results || []);
+  } catch (err: any) {
+    console.error('[Manifest] Failed to query manifest:', err);
+    return c.json({ error: "Failed to fetch plugins manifest.", details: err?.message }, 500);
+  }
 };
 
 app.get('/manifest.json', manifestHandler);
