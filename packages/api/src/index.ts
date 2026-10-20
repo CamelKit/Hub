@@ -62,6 +62,16 @@ app.use('*', async (c, next) => {
         if (host === 'localhost' || host === '127.0.0.1') {
           return origin;
         }
+        if (
+          host === 'memoriesofmagic.com' ||
+          host.endsWith('.memoriesofmagic.com') ||
+          host === 'memoriesofmagic.wiki' ||
+          host.endsWith('.memoriesofmagic.wiki') ||
+          host === 'evilquest.net' ||
+          host.endsWith('.evilquest.net')
+        ) {
+          return origin;
+        }
         if (cleanHost) {
           const targetHost = cleanHost.toLowerCase();
           if (host === targetHost || host.endsWith(`.${targetHost}`)) {
@@ -767,6 +777,301 @@ app.post('/api/dev/seed', async (c) => {
   
   return c.json({ success: true, message: "Seeded 4 fake plugins into your account." });
 });
+
+// --- Crowdsourced Drop Telemetry & Wiki Aggregation Endpoints ---
+
+const dropItemSchema = z.object({
+  itemId: z.number().int().positive(),
+  itemName: z.string().max(100).optional(),
+  quantity: z.number().int().positive().max(1000000),
+});
+
+const dropEventSchema = z.object({
+  npcDefId: z.number().int().positive(),
+  npcName: z.string().min(1).max(100),
+  combatLevel: z.number().int().nonnegative().optional().default(0),
+  drops: z.array(dropItemSchema).max(50),
+  timestamp: z.number().int().optional(),
+});
+
+const telemetryBatchSchema = z.object({
+  client: z.string().max(50).optional(),
+  version: z.string().max(20).optional(),
+  events: z.array(dropEventSchema).min(1).max(100),
+});
+
+async function computeReporterHash(c: any): Promise<string> {
+  const ip = c.req.header('cf-connecting-ip') || c.req.header('x-forwarded-for') || '127.0.0.1';
+  const salt = c.env.JWT_SECRET || 'camelkit-telemetry-salt';
+  const msgUint8 = new TextEncoder().encode(`${ip}:${salt}`);
+  const hashBuffer = await crypto.subtle.digest('SHA-256', msgUint8);
+  const hashArray = Array.from(new Uint8Array(hashBuffer));
+  return hashArray.map((b) => b.toString(16).padStart(2, '0')).join('').slice(0, 32);
+}
+
+const dropTelemetryHandler = async (c: any) => {
+  let body: any;
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: 'Invalid JSON payload' }, 400);
+  }
+
+  const parseResult = telemetryBatchSchema.safeParse(body);
+  if (!parseResult.success) {
+    return c.json({ error: 'Validation failed', details: parseResult.error.format() }, 400);
+  }
+
+  const { events } = parseResult.data;
+  const reporterHash = await computeReporterHash(c);
+
+  // In-memory aggregation across the batch to minimize SQL operations
+  const killAggregates = new Map<number, { npcName: string; combatLevel: number; count: number }>();
+  const dropAggregates = new Map<string, { npcDefId: number; itemId: number; itemName?: string; totalDrops: number; totalQty: number; minQty: number; maxQty: number }>();
+
+  for (const event of events) {
+    const { npcDefId, npcName, combatLevel = 0, drops } = event;
+    const existingKill = killAggregates.get(npcDefId);
+    if (existingKill) {
+      existingKill.count += 1;
+      if (combatLevel > 0) existingKill.combatLevel = combatLevel;
+    } else {
+      killAggregates.set(npcDefId, { npcName, combatLevel, count: 1 });
+    }
+
+    for (const drop of drops) {
+      const dropKey = `${npcDefId}:${drop.itemId}`;
+      const existingDrop = dropAggregates.get(dropKey);
+      if (existingDrop) {
+        existingDrop.totalDrops += 1;
+        existingDrop.totalQty += drop.quantity;
+        existingDrop.minQty = Math.min(existingDrop.minQty, drop.quantity);
+        existingDrop.maxQty = Math.max(existingDrop.maxQty, drop.quantity);
+        if (drop.itemName && !existingDrop.itemName) existingDrop.itemName = drop.itemName;
+      } else {
+        dropAggregates.set(dropKey, {
+          npcDefId,
+          itemId: drop.itemId,
+          itemName: drop.itemName || '',
+          totalDrops: 1,
+          totalQty: drop.quantity,
+          minQty: drop.quantity,
+          maxQty: drop.quantity,
+        });
+      }
+    }
+  }
+
+  const statements: any[] = [];
+
+  // 1. Upsert kill totals (denominator)
+  for (const [npcDefId, kill] of killAggregates.entries()) {
+    statements.push(
+      c.env.DB.prepare(`
+        INSERT INTO npc_kill_totals (npc_def_id, npc_name, combat_level, total_kills, last_killed_at)
+        VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(npc_def_id) DO UPDATE SET
+          total_kills = total_kills + excluded.total_kills,
+          last_killed_at = CURRENT_TIMESTAMP,
+          npc_name = excluded.npc_name,
+          combat_level = CASE WHEN excluded.combat_level > 0 THEN excluded.combat_level ELSE npc_kill_totals.combat_level END
+      `).bind(npcDefId, kill.npcName, kill.combatLevel, kill.count)
+    );
+  }
+
+  // 2. Upsert drop details and track unique reporters (numerator + anti-cheat consensus)
+  for (const drop of dropAggregates.values()) {
+    statements.push(
+      c.env.DB.prepare(`
+        INSERT OR IGNORE INTO drop_reporters (reporter_hash, npc_def_id, item_id, created_at)
+        VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+      `).bind(reporterHash, drop.npcDefId, drop.itemId)
+    );
+
+    statements.push(
+      c.env.DB.prepare(`
+        INSERT INTO npc_drop_totals (
+          npc_def_id, item_id, item_name, total_drops, total_quantity, min_quantity, max_quantity, unique_reporters, status, last_dropped_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, 'unconfirmed', CURRENT_TIMESTAMP)
+        ON CONFLICT(npc_def_id, item_id) DO UPDATE SET
+          item_name = COALESCE(excluded.item_name, npc_drop_totals.item_name),
+          total_drops = total_drops + excluded.total_drops,
+          total_quantity = total_quantity + excluded.total_quantity,
+          min_quantity = MIN(min_quantity, excluded.min_quantity),
+          max_quantity = MAX(max_quantity, excluded.max_quantity),
+          last_dropped_at = CURRENT_TIMESTAMP
+      `).bind(drop.npcDefId, drop.itemId, drop.itemName || null, drop.totalDrops, drop.totalQty, drop.minQty, drop.maxQty)
+    );
+
+    statements.push(
+      c.env.DB.prepare(`
+        UPDATE npc_drop_totals
+        SET unique_reporters = (
+          SELECT COUNT(DISTINCT reporter_hash) FROM drop_reporters WHERE npc_def_id = ? AND item_id = ?
+        ),
+        status = CASE 
+          WHEN (SELECT COUNT(DISTINCT reporter_hash) FROM drop_reporters WHERE npc_def_id = ? AND item_id = ?) >= 3 
+          THEN 'confirmed' 
+          ELSE 'unconfirmed' 
+        END
+        WHERE npc_def_id = ? AND item_id = ?
+      `).bind(drop.npcDefId, drop.itemId, drop.npcDefId, drop.itemId, drop.npcDefId, drop.itemId)
+    );
+  }
+
+  try {
+    if (statements.length > 0) {
+      await c.env.DB.batch(statements);
+    }
+    return c.json({
+      success: true,
+      processedEvents: events.length,
+      killsRecorded: events.length,
+    });
+  } catch (err: any) {
+    console.error('Failed to commit telemetry batch:', err);
+    return c.json({ error: 'Database execution failed', details: err?.message }, 500);
+  }
+};
+
+const wikiDropsHandler = async (c: any) => {
+  const showAll = c.req.query('all') === 'true' || c.req.query('all') === '1';
+  const npcNameParam = c.req.query('npc_name') || c.req.query('name');
+  const npcDefIdParam = c.req.query('npc_def_id');
+  const itemIdParam = c.req.query('item_id');
+  const minKillsParam = c.req.query('min_kills');
+
+  const minKills = minKillsParam ? parseInt(minKillsParam, 10) || 0 : 0;
+  const npcDefId = npcDefIdParam ? parseInt(npcDefIdParam, 10) : null;
+  const itemId = itemIdParam ? parseInt(itemIdParam, 10) : null;
+
+  let query = `
+    SELECT 
+      k.npc_def_id,
+      k.npc_name,
+      k.combat_level,
+      k.total_kills,
+      d.item_id,
+      d.item_name,
+      d.total_drops,
+      d.total_quantity,
+      d.min_quantity,
+      d.max_quantity,
+      d.unique_reporters,
+      d.status,
+      d.last_dropped_at
+    FROM npc_drop_totals d
+    JOIN npc_kill_totals k ON d.npc_def_id = k.npc_def_id
+    WHERE 1=1
+  `;
+  const binds: any[] = [];
+
+  if (!showAll) {
+    query += ` AND d.status = 'confirmed'`;
+  }
+  if (npcNameParam && npcNameParam.trim()) {
+    query += ` AND LOWER(k.npc_name) = LOWER(?)`;
+    binds.push(npcNameParam.trim());
+  }
+  if (npcDefId !== null && !isNaN(npcDefId)) {
+    query += ` AND d.npc_def_id = ?`;
+    binds.push(npcDefId);
+  }
+  if (itemId !== null && !isNaN(itemId)) {
+    query += ` AND d.item_id = ?`;
+    binds.push(itemId);
+  }
+  if (minKills > 0) {
+    query += ` AND k.total_kills >= ?`;
+    binds.push(minKills);
+  }
+
+  query += ` ORDER BY k.npc_name ASC, d.total_drops DESC`;
+
+  try {
+    let npcMeta: any = null;
+    if (npcNameParam || npcDefIdParam) {
+      let metaQuery = "SELECT npc_def_id, npc_name, combat_level, total_kills, last_killed_at FROM npc_kill_totals WHERE ";
+      metaQuery += npcNameParam ? "LOWER(npc_name) = LOWER(?)" : "npc_def_id = ?";
+      const metaStmt = c.env.DB.prepare(metaQuery);
+      npcMeta = await (npcNameParam ? metaStmt.bind(npcNameParam.trim()) : metaStmt.bind(npcDefId)).first();
+    }
+
+    const stmt = c.env.DB.prepare(query);
+    const { results } = binds.length > 0 ? await stmt.bind(...binds).all() : await stmt.all();
+
+    const formattedDrops = (results || []).map((row: any) => {
+      const totalKills = Number(row.total_kills) || 1;
+      const totalDrops = Number(row.total_drops) || 0;
+      const dropRate = totalKills > 0 ? totalDrops / totalKills : 0;
+      const ratePct = Number((dropRate * 100).toFixed(4));
+
+      let fraction = 'Unknown';
+      if (dropRate > 0) {
+        const inv = 1 / dropRate;
+        fraction = inv >= 1.05 ? `1/${Math.round(inv)}` : `1/${inv.toFixed(1)}`;
+      }
+
+      return {
+        npc_def_id: row.npc_def_id,
+        npc_name: row.npc_name,
+        combat_level: row.combat_level,
+        total_kills: row.total_kills,
+        item_id: row.item_id,
+        item_name: row.item_name || `Item #${row.item_id}`,
+        total_drops: row.total_drops,
+        total_quantity: row.total_quantity,
+        min_quantity: row.min_quantity,
+        max_quantity: row.max_quantity,
+        quantity_range:
+          row.min_quantity === row.max_quantity
+            ? `${row.min_quantity}`
+            : `${row.min_quantity}-${row.max_quantity}`,
+        unique_reporters: row.unique_reporters,
+        status: row.status,
+        drop_rate: dropRate,
+        drop_rate_pct: ratePct,
+        formatted_rate: fraction,
+        last_dropped_at: row.last_dropped_at,
+      };
+    });
+
+    return c.json({
+      success: true,
+      npc: npcMeta,
+      total_kills: npcMeta?.total_kills ?? formattedDrops[0]?.total_kills ?? 0,
+      count: formattedDrops.length,
+      drops: formattedDrops,
+    });
+  } catch (err: any) {
+    console.error('Failed to query wiki drops:', err);
+    return c.json({ error: 'Failed to query wiki drops', details: err?.message }, 500);
+  }
+};
+
+const wikiNpcKillsHandler = async (c: any) => {
+  try {
+    const { results } = await c.env.DB.prepare(
+      'SELECT npc_def_id, npc_name, combat_level, total_kills, last_killed_at FROM npc_kill_totals ORDER BY total_kills DESC'
+    ).all();
+
+    return c.json({
+      success: true,
+      count: results?.length || 0,
+      npcs: results || [],
+    });
+  } catch (err: any) {
+    console.error('Failed to query NPC kill counts:', err);
+    return c.json({ error: 'Failed to query NPC kills', details: err?.message }, 500);
+  }
+};
+
+app.post('/telemetry/drops', dropTelemetryHandler);
+app.post('/api/telemetry/drops', dropTelemetryHandler);
+app.get('/wiki/drops', wikiDropsHandler);
+app.get('/api/wiki/drops', wikiDropsHandler);
+app.get('/wiki/npc-kills', wikiNpcKillsHandler);
+app.get('/api/wiki/npc-kills', wikiNpcKillsHandler);
 
 // Export the type definition so your Svelte forms gain automatic compile-time RPC type-safety! [cite: 114, 116]
 export type AppType = typeof app;
