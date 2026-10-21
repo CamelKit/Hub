@@ -503,6 +503,14 @@ app.get('/api/admin/queue', adminGate(), async (c) => {
   return c.json(results);
 });
 
+// Admin Builds View Endpoint: lists plugins currently building, failed, or awaiting build
+app.get('/api/admin/builds', adminGate(), async (c) => {
+  const { results } = await c.env.DB.prepare(
+    "SELECT * FROM plugins WHERE status IN ('building', 'failed', 'approved') ORDER BY id DESC"
+  ).all();
+  return c.json(results);
+});
+
 // Admin Approve Endpoint
 app.post('/api/admin/plugins/:id/approve', adminGate(), async (c) => {
   const id = c.req.param('id');
@@ -597,6 +605,109 @@ app.post('/api/admin/plugins/:id/reject', adminGate(), async (c) => {
   } catch (err) {
     console.error(err);
     return c.json({ error: "Failed to reject plugin." }, 500);
+  }
+});
+
+// Admin Retry Build Endpoint
+app.post('/api/admin/plugins/:id/retry', adminGate(), async (c) => {
+  const id = c.req.param('id');
+  const jwtPayload = c.get('jwtPayload') as any;
+  try {
+    const plugin = await c.env.DB.prepare("SELECT * FROM plugins WHERE id = ?").bind(id).first() as any;
+    if (!plugin) {
+      return c.json({ error: "Plugin not found." }, 404);
+    }
+
+    const match = plugin.github_url.match(/^https:\/\/github\.com\/([\w-]+)\/([\w-]+)$/);
+    if (!match) {
+      return c.json({ error: "Invalid GitHub URL format." }, 400);
+    }
+    const [_, owner, repo] = match;
+
+    const body = await c.req.json().catch(() => ({}));
+
+    // Resolve commit hash: check if specific commit requested, or fetch latest if requested, or use pinned
+    let commit_hash: string | null = body.commit_hash || null;
+    if (!commit_hash && body.sync_latest) {
+      try {
+        const latestCommitRes = await githubFetch(`https://api.github.com/repos/${owner}/${repo}/commits?per_page=1`, c.env);
+        if (latestCommitRes.ok) {
+          const commits = await latestCommitRes.json() as any[];
+          if (commits && commits.length > 0 && commits[0].sha) commit_hash = commits[0].sha;
+        }
+      } catch (e) {
+        console.error("Failed to fetch latest commit hash from GitHub", e);
+      }
+    }
+
+    if (!commit_hash) {
+      commit_hash = plugin.latest_commit_hash && plugin.latest_commit_hash !== 'unknown' ? plugin.latest_commit_hash : null;
+    }
+
+    if (!commit_hash) {
+      try {
+        const latestCommitRes = await githubFetch(`https://api.github.com/repos/${owner}/${repo}/commits?per_page=1`, c.env);
+        if (latestCommitRes.ok) {
+          const commits = await latestCommitRes.json() as any[];
+          if (commits && commits.length > 0 && commits[0].sha) commit_hash = commits[0].sha;
+        }
+      } catch (e) {
+        console.error("Failed to fetch commit hash", e);
+      }
+    }
+
+    if (!commit_hash) {
+      return c.json({ error: "Failed to resolve commit hash from GitHub repository." }, 502);
+    }
+
+    // Trigger GitHub Actions workflow via repository dispatch
+    const isLocalDev = new URL(c.req.url).hostname === 'localhost' || new URL(c.req.url).hostname === '127.0.0.1';
+    
+    if (isLocalDev) {
+      console.log("Mocking GitHub Action dispatch in local development mode.");
+      const mockWebhook = async () => {
+        await new Promise(r => setTimeout(r, 5000));
+        await fetch(`${new URL(c.req.url).origin}/api/plugins/callback`, {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${c.env.HUB_CALLBACK_TOKEN}`,
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ plugin_id: id, commit_hash: commit_hash, status: 'published', version: '1.0.0', asset_sha: 'sha256:localdevmock' })
+        });
+      };
+      c.executionCtx.waitUntil(mockWebhook());
+    } else {
+      const dispatchRes = await githubFetch(`https://api.github.com/repos/CamelKit/Plugin-Builder/dispatches`, c.env, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          event_type: 'build_plugin',
+          client_payload: {
+            plugin_id: id,
+            plugin_name: plugin.name,
+            author: plugin.author,
+            github_url: plugin.github_url,
+            approved_by: jwtPayload.username,
+            commit_hash: commit_hash
+          }
+        })
+      });
+
+      if (!dispatchRes.ok) {
+          const errorText = await dispatchRes.text();
+          console.error("Failed to dispatch GitHub Action:", errorText);
+          return c.json({ error: "Failed to trigger plugin build workflow." }, 500);
+      }
+    }
+
+    await c.env.DB.prepare("UPDATE plugins SET status = 'building', latest_commit_hash = COALESCE(?, latest_commit_hash) WHERE id = ?").bind(commit_hash, id).run();
+    return c.json({ success: true, message: "Build retry triggered.", hash: commit_hash });
+  } catch (err) {
+    console.error(err);
+    return c.json({ error: "Failed to retry plugin build." }, 500);
   }
 });
 
