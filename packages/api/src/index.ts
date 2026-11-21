@@ -89,9 +89,23 @@ app.use('*', async (c, next) => {
 });
 
 // 3. Setup your Zod Validation Contracts [cite: 123, 127]
+const GITHUB_PLUGIN_URL_REGEX = /^https:\/\/github\.com\/([\w-]+)\/([\w-]+)(?:\/tree\/([\w.-]+)\/([\w./-]+))?$/;
+
 const submitPluginSchema = z.object({
-  githubUrl: z.string().url().regex(/^https:\/\/github\.com\/[\w-]+\/[\w-]+$/),
+  githubUrl: z.string().url().regex(GITHUB_PLUGIN_URL_REGEX),
 });
+
+function parseGithubPluginUrl(url?: string): { owner: string; repo: string; branch?: string; subpath?: string } | null {
+  if (!url) return null;
+  const match = url.match(GITHUB_PLUGIN_URL_REGEX);
+  if (!match) return null;
+  return {
+    owner: match[1],
+    repo: match[2],
+    branch: match[3] || undefined,
+    subpath: match[4] ? match[4].replace(/^\/+|\/+$/g, '') : undefined,
+  };
+}
 
 // 4. Custom Admin Gatekeeper Middleware
 const adminGate = () => async (c: any, next: any) => {
@@ -437,21 +451,22 @@ app.post('/api/plugins/submit', githubDeveloperGate(), zValidator('json', submit
   const { githubUrl } = c.req.valid('json'); // Data is guaranteed verified [cite: 123]
   const jwtPayload = c.get('jwtPayload') as any;
 
-  // Extract owner and repo from URL
-  const match = githubUrl.match(/^https:\/\/github\.com\/([\w-]+)\/([\w-]+)$/);
-  if (!match) {
+  // Extract owner, repo, and optional monorepo subpath from URL
+  const parsedUrl = parseGithubPluginUrl(githubUrl);
+  if (!parsedUrl) {
     return c.json({ error: "Invalid GitHub URL format." }, 400);
   }
-  const [_, owner, repo] = match;
+  const { owner, repo, branch, subpath } = parsedUrl;
 
-  // Verify personal repository ownership using github_username (fallback to username)
+  // Verify personal repository ownership using github_username (or allow admins to submit official CamelKit repos)
   const allowedGithubUser = (jwtPayload.github_username || jwtPayload.username || '').toLowerCase();
-  if (owner.toLowerCase() !== allowedGithubUser) {
+  const isOfficialAdminSubmit = Boolean(jwtPayload.isAdmin && owner.toLowerCase() === 'camelkit');
+  if (owner.toLowerCase() !== allowedGithubUser && !isOfficialAdminSubmit) {
     return c.json({ error: "You can only submit plugins from your personal GitHub account." }, 403);
   }
 
   // Fetch repository metadata and latest commit hash from GitHub API (authenticated)
-  let name = repo;
+  let name = subpath ? subpath.split('/').pop() || repo : repo;
   let description = '';
   let author = owner;
   let latestCommitHash = "unknown";
@@ -460,9 +475,24 @@ app.post('/api/plugins/submit', githubDeveloperGate(), zValidator('json', submit
     const ghRes = await githubFetch(`https://api.github.com/repos/${owner}/${repo}`, c.env);
     if (ghRes.ok) {
       const ghData = await ghRes.json() as any;
-      name = ghData.name || repo;
+      if (!subpath) {
+        name = ghData.name || repo;
+      }
       description = ghData.description || '';
       author = ghData.owner?.login || owner;
+    }
+    if (subpath) {
+      const pkgUrl = `https://api.github.com/repos/${owner}/${repo}/contents/${subpath}/package.json${branch ? `?ref=${encodeURIComponent(branch)}` : ''}`;
+      const pkgRes = await githubFetch(pkgUrl, c.env);
+      if (pkgRes.ok) {
+        const pkgFile = await pkgRes.json() as any;
+        if (pkgFile?.content) {
+          const decoded = JSON.parse(atob(pkgFile.content.replace(/\s/g, '')));
+          name = decoded.camelkit?.pluginName || decoded.displayName || decoded.name || name;
+          description = decoded.description || description;
+          author = decoded.author || author;
+        }
+      }
     }
   } catch (err) {
     console.error("Failed to fetch from GitHub API", err);
@@ -470,7 +500,10 @@ app.post('/api/plugins/submit', githubDeveloperGate(), zValidator('json', submit
   }
 
   try {
-    const commitRes = await githubFetch(`https://api.github.com/repos/${owner}/${repo}/commits?per_page=1`, c.env);
+    const commitsQuery = new URLSearchParams({ per_page: '1' });
+    if (branch) commitsQuery.set('sha', branch);
+    if (subpath) commitsQuery.set('path', subpath);
+    const commitRes = await githubFetch(`https://api.github.com/repos/${owner}/${repo}/commits?${commitsQuery.toString()}`, c.env);
     if (commitRes.ok) {
       const commits = await commitRes.json() as any[];
       if (commits && commits.length > 0) {
@@ -521,17 +554,20 @@ app.post('/api/admin/plugins/:id/approve', adminGate(), async (c) => {
       return c.json({ error: "Plugin not found." }, 404);
     }
 
-    const match = plugin.github_url.match(/^https:\/\/github\.com\/([\w-]+)\/([\w-]+)$/);
-    if (!match) {
+    const parsedUrl = parseGithubPluginUrl(plugin.github_url);
+    if (!parsedUrl) {
       return c.json({ error: "Invalid GitHub URL format." }, 400);
     }
-    const [_, owner, repo] = match;
+    const { owner, repo, branch, subpath } = parsedUrl;
 
     // Resolve commit hash: use already pinned commit or fetch latest
     let commit_hash = plugin.latest_commit_hash && plugin.latest_commit_hash !== 'unknown' ? plugin.latest_commit_hash : null;
     if (!commit_hash) {
       try {
-        const latestCommitRes = await githubFetch(`https://api.github.com/repos/${owner}/${repo}/commits?per_page=1`, c.env);
+        const commitsQuery = new URLSearchParams({ per_page: '1' });
+        if (branch) commitsQuery.set('sha', branch);
+        if (subpath) commitsQuery.set('path', subpath);
+        const latestCommitRes = await githubFetch(`https://api.github.com/repos/${owner}/${repo}/commits?${commitsQuery.toString()}`, c.env);
         if (latestCommitRes.ok) {
           const commits = await latestCommitRes.json() as any[];
           if (commits && commits.length > 0 && commits[0].sha) commit_hash = commits[0].sha;
@@ -618,19 +654,22 @@ app.post('/api/admin/plugins/:id/retry', adminGate(), async (c) => {
       return c.json({ error: "Plugin not found." }, 404);
     }
 
-    const match = plugin.github_url.match(/^https:\/\/github\.com\/([\w-]+)\/([\w-]+)$/);
-    if (!match) {
+    const parsedUrl = parseGithubPluginUrl(plugin.github_url);
+    if (!parsedUrl) {
       return c.json({ error: "Invalid GitHub URL format." }, 400);
     }
-    const [_, owner, repo] = match;
+    const { owner, repo, branch, subpath } = parsedUrl;
 
     const body = await c.req.json().catch(() => ({}));
+    const commitsQuery = new URLSearchParams({ per_page: '1' });
+    if (branch) commitsQuery.set('sha', branch);
+    if (subpath) commitsQuery.set('path', subpath);
 
     // Resolve commit hash: check if specific commit requested, or fetch latest if requested, or use pinned
     let commit_hash: string | null = body.commit_hash || null;
     if (!commit_hash && body.sync_latest) {
       try {
-        const latestCommitRes = await githubFetch(`https://api.github.com/repos/${owner}/${repo}/commits?per_page=1`, c.env);
+        const latestCommitRes = await githubFetch(`https://api.github.com/repos/${owner}/${repo}/commits?${commitsQuery.toString()}`, c.env);
         if (latestCommitRes.ok) {
           const commits = await latestCommitRes.json() as any[];
           if (commits && commits.length > 0 && commits[0].sha) commit_hash = commits[0].sha;
@@ -646,7 +685,7 @@ app.post('/api/admin/plugins/:id/retry', adminGate(), async (c) => {
 
     if (!commit_hash) {
       try {
-        const latestCommitRes = await githubFetch(`https://api.github.com/repos/${owner}/${repo}/commits?per_page=1`, c.env);
+        const latestCommitRes = await githubFetch(`https://api.github.com/repos/${owner}/${repo}/commits?${commitsQuery.toString()}`, c.env);
         if (latestCommitRes.ok) {
           const commits = await latestCommitRes.json() as any[];
           if (commits && commits.length > 0 && commits[0].sha) commit_hash = commits[0].sha;
@@ -752,11 +791,14 @@ app.get('/api/developer/plugins', githubDeveloperGate(), async (c) => {
   // Fetch remote commit hash for each published/approved plugin to check for updates
   const enrichedResults = await Promise.all(results.map(async (plugin: any) => {
     if (plugin.status === 'approved' || plugin.status === 'published') {
-      const match = plugin.github_url?.match(/^https:\/\/github\.com\/([\w-]+)\/([\w-]+)$/);
-      if (match) {
-        const [_, owner, repo] = match;
+      const parsedUrl = parseGithubPluginUrl(plugin.github_url);
+      if (parsedUrl) {
+        const { owner, repo, branch, subpath } = parsedUrl;
         try {
-          const ghRes = await githubFetch(`https://api.github.com/repos/${owner}/${repo}/commits?per_page=1`, c.env);
+          const commitsQuery = new URLSearchParams({ per_page: '1' });
+          if (branch) commitsQuery.set('sha', branch);
+          if (subpath) commitsQuery.set('path', subpath);
+          const ghRes = await githubFetch(`https://api.github.com/repos/${owner}/${repo}/commits?${commitsQuery.toString()}`, c.env);
           if (ghRes.ok) {
             const commits = await ghRes.json() as any[];
             if (commits && commits.length > 0) {
@@ -792,14 +834,17 @@ app.post('/api/developer/plugins/:id/update', githubDeveloperGate(), async (c) =
     return c.json({ error: `Cannot trigger a build while plugin status is '${plugin.status}'.` }, 403);
   }
 
-  const match = plugin.github_url.match(/^https:\/\/github\.com\/([\w-]+)\/([\w-]+)$/);
-  if (!match) {
+  const parsedUrl = parseGithubPluginUrl(plugin.github_url);
+  if (!parsedUrl) {
     return c.json({ error: "Invalid GitHub URL." }, 400);
   }
-  const [_, owner, repo] = match;
+  const { owner, repo, branch, subpath } = parsedUrl;
 
   try {
-    const ghRes = await githubFetch(`https://api.github.com/repos/${owner}/${repo}/commits?per_page=1`, c.env);
+    const commitsQuery = new URLSearchParams({ per_page: '1' });
+    if (branch) commitsQuery.set('sha', branch);
+    if (subpath) commitsQuery.set('path', subpath);
+    const ghRes = await githubFetch(`https://api.github.com/repos/${owner}/${repo}/commits?${commitsQuery.toString()}`, c.env);
 
     if (!ghRes.ok) {
       return c.json({ error: "Failed to fetch commits from GitHub." }, 502);

@@ -40,10 +40,10 @@
             type="url" 
             id="githubUrl" 
             bind:value={url}
-            placeholder="https://github.com/username/repo" 
+            placeholder="https://github.com/username/repo (or /tree/branch/packages/plugin)" 
             required 
-            pattern="^https:\/\/github\.com\/[\w-]+\/[\w-]+$" 
-            title="Must be a valid GitHub repository URL" 
+            pattern="^https:\/\/github\.com\/[\w-]+\/[\w-]+(\/tree\/[\w.-]+\/[\w.\/-]+)?$" 
+            title="Must be a valid GitHub repository URL or monorepo package URL" 
         />
     </div>
     <button type="submit" class="submit-btn">Submit</button>
